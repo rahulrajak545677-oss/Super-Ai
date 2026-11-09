@@ -1,8 +1,9 @@
 name: Build AutoForge
 
 # Save as .github/workflows/android-build.yml at the ROOT of the repo.
-# The android/ and backend/ folders are found automatically, so it works
-# whether they sit at the repo root or inside a subfolder (e.g. autoforge/).
+# The android/ and backend/ folders are found automatically: at the repo root,
+# inside a subfolder (e.g. autoforge/), or - if the repo only contains a
+# project .zip - inside that zip, which is extracted during the run.
 
 on:
   push:
@@ -41,7 +42,17 @@ jobs:
         run: |
           echo "Repo layout (3 levels):"
           find . -maxdepth 3 -not -path './.git*' | sort
-          f=$(find . -name settings.gradle.kts -not -path '*/node_modules/*' -not -path './.git/*' | head -n 1)
+          find_android() { find . -name settings.gradle.kts -not -path '*/node_modules/*' -not -path '*/__MACOSX/*' -not -path './.git/*' | head -n 1; }
+          f=$(find_android)
+          if [ -z "$f" ]; then
+            zip=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -n 1)
+            if [ -n "$zip" ]; then
+              echo "No Gradle project in the repo - extracting $zip"
+              mkdir -p _src
+              unzip -q -o "$zip" -d _src
+              f=$(find_android)
+            fi
+          fi
           if [ -z "$f" ]; then
             echo "::error::settings.gradle.kts not found - is the android/ folder committed?"
             exit 1
@@ -95,7 +106,17 @@ jobs:
       - name: Locate backend
         id: loc
         run: |
-          s=$(find . -path '*/src/server.js' -not -path '*/node_modules/*' -not -path './.git/*' | head -n 1)
+          find_server() { find . -path '*/src/server.js' -not -path '*/node_modules/*' -not -path '*/__MACOSX/*' -not -path './.git/*' | head -n 1; }
+          s=$(find_server)
+          if [ -z "$s" ]; then
+            zip=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -n 1)
+            if [ -n "$zip" ]; then
+              echo "No backend in the repo - extracting $zip"
+              mkdir -p _src
+              unzip -q -o "$zip" -d _src
+              s=$(find_server)
+            fi
+          fi
           if [ -z "$s" ]; then
             echo "::error::backend/src/server.js not found - is the backend/ folder committed?"
             exit 1
