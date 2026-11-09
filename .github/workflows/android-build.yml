@@ -43,7 +43,7 @@ jobs:
           $CMD assembleDebug --console=plain > build.log 2>&1
           STATUS=$?
           echo "=========== ERROR SUMMARY ==========="
-          grep -n -A10 -E "What went wrong|error:|^e: |FAILURE" build.log | head -60
+          grep -E "^e: |error:|What went wrong|Execution failed|Platform declaration clash|Unresolved reference" build.log | head -40
           echo "====================================="
           exit $STATUS
 
