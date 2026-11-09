@@ -1,160 +1,46 @@
-name: Build AutoForge
-
-# Save as .github/workflows/android-build.yml at the ROOT of the repo.
-# The android/ and backend/ folders are found automatically: at the repo root,
-# inside a subfolder (e.g. autoforge/), or - if the repo only contains a
-# project .zip - inside that zip, which is extracted during the run.
+name: Build APK
 
 on:
   push:
-    branches: [main, master]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
-    inputs:
-      backend_url:
-        description: 'HTTPS URL of your deployed backend (baked into the APK as BACKEND_URL)'
-        required: false
-        type: string
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
-  android:
-    name: Android debug APK
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      # Manual input wins; otherwise the repo variable AUTOFORGE_BACKEND
-      # (Settings > Secrets and variables > Actions > Variables); otherwise the
-      # default from gradle.properties (http://10.0.2.2:8080/).
-      BACKEND_URL: ${{ inputs.backend_url || vars.AUTOFORGE_BACKEND }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Locate Android project
-        id: loc
-        run: |
-          echo "Repo layout (3 levels):"
-          find . -maxdepth 3 -not -path './.git*' | sort
-          find_android() { find . -name settings.gradle.kts -not -path '*/node_modules/*' -not -path '*/__MACOSX/*' -not -path './.git/*' | head -n 1; }
-          f=$(find_android)
-          if [ -z "$f" ]; then
-            zip=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -n 1)
-            if [ -n "$zip" ]; then
-              echo "No Gradle project in the repo - extracting $zip"
-              mkdir -p _src
-              unzip -q -o "$zip" -d _src
-              f=$(find_android)
-            fi
-          fi
-          if [ -z "$f" ]; then
-            echo "::error::settings.gradle.kts not found - is the android/ folder committed?"
-            exit 1
-          fi
-          dir=$(dirname "$f")
-          echo "Android project: $dir"
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+          gradle-version: 8.7
 
-      # The repo has no Gradle wrapper, so install the same Gradle the
-      # backend builder image uses (8.9; AGP 8.5.2 needs 8.7+).
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+      - name: Unzip project if uploaded as zip
+        run: |
+          ZIP=$(find . -maxdepth 1 -name "*.zip" | head -n 1)
+          if [ -n "$ZIP" ]; then
+            mkdir -p unzipped
+            unzip -q -o "$ZIP" -d unzipped
+          fi
 
       - name: Build debug APK
-        working-directory: ${{ steps.loc.outputs.dir }}
         run: |
-          ARGS=()
-          if [ -n "$BACKEND_URL" ]; then
-            ARGS+=("-PautoforgeBackend=$BACKEND_URL")
+          SETTINGS=$(find . \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -not -path "*/.git/*" | head -n 1)
+          [ -z "$SETTINGS" ] && echo "No Gradle project found" && exit 1
+          cd "$(dirname "$SETTINGS")"
+          echo "org.gradle.jvmargs=-Xmx3g" >> gradle.properties
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
           fi
-          gradle assembleDebug --stacktrace --console=plain "${ARGS[@]}"
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: AutoForge-debug-apk
-          path: ${{ steps.loc.outputs.dir }}/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 14
-
-  backend:
-    name: Backend check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Locate backend
-        id: loc
-        run: |
-          find_server() { find . -path '*/src/server.js' -not -path '*/node_modules/*' -not -path '*/__MACOSX/*' -not -path './.git/*' | head -n 1; }
-          s=$(find_server)
-          if [ -z "$s" ]; then
-            zip=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -n 1)
-            if [ -n "$zip" ]; then
-              echo "No backend in the repo - extracting $zip"
-              mkdir -p _src
-              unzip -q -o "$zip" -d _src
-              s=$(find_server)
-            fi
-          fi
-          if [ -z "$s" ]; then
-            echo "::error::backend/src/server.js not found - is the backend/ folder committed?"
-            exit 1
-          fi
-          dir=$(dirname "$(dirname "$s")")
-          echo "Backend: $dir"
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        working-directory: ${{ steps.loc.outputs.dir }}
-        run: npm install --no-audit --no-fund
-
-      - name: Syntax check
-        working-directory: ${{ steps.loc.outputs.dir }}
-        run: |
-          for f in src/*.js scripts/*.js; do
-            echo "node --check $f"
-            node --check "$f"
-          done
-
-  release:
-    name: Attach APK to GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [android, backend]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: AutoForge-debug-apk
-          path: apk
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: apk/*.apk
-          generate_release_notes: true
+          name: app-debug
+          path: "**/build/outputs/apk/debug/*.apk"
