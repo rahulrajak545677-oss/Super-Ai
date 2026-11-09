@@ -1,7 +1,8 @@
 name: Build AutoForge
 
-# Place this file at .github/workflows/android-build.yml in the repo root
-# (the folder that contains android/ and backend/).
+# Save as .github/workflows/android-build.yml at the ROOT of the repo.
+# The android/ and backend/ folders are found automatically, so it works
+# whether they sit at the repo root or inside a subfolder (e.g. autoforge/).
 
 on:
   push:
@@ -27,16 +28,27 @@ jobs:
     name: Android debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: android
     env:
       # Manual input wins; otherwise the repo variable AUTOFORGE_BACKEND
       # (Settings > Secrets and variables > Actions > Variables); otherwise the
-      # default from android/gradle.properties (http://10.0.2.2:8080/).
+      # default from gradle.properties (http://10.0.2.2:8080/).
       BACKEND_URL: ${{ inputs.backend_url || vars.AUTOFORGE_BACKEND }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Locate Android project
+        id: loc
+        run: |
+          echo "Repo layout (3 levels):"
+          find . -maxdepth 3 -not -path './.git*' | sort
+          f=$(find . -name settings.gradle.kts -not -path '*/node_modules/*' -not -path './.git/*' | head -n 1)
+          if [ -z "$f" ]; then
+            echo "::error::settings.gradle.kts not found - is the android/ folder committed?"
+            exit 1
+          fi
+          dir=$(dirname "$f")
+          echo "Android project: $dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -57,6 +69,7 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build debug APK
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           ARGS=()
           if [ -n "$BACKEND_URL" ]; then
@@ -68,7 +81,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AutoForge-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.loc.outputs.dir }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -76,20 +89,31 @@ jobs:
     name: Backend check
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
+
+      - name: Locate backend
+        id: loc
+        run: |
+          s=$(find . -path '*/src/server.js' -not -path '*/node_modules/*' -not -path './.git/*' | head -n 1)
+          if [ -z "$s" ]; then
+            echo "::error::backend/src/server.js not found - is the backend/ folder committed?"
+            exit 1
+          fi
+          dir=$(dirname "$(dirname "$s")")
+          echo "Backend: $dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install dependencies
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: npm install --no-audit --no-fund
 
       - name: Syntax check
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           for f in src/*.js scripts/*.js; do
             echo "node --check $f"
