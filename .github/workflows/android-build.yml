@@ -1,0 +1,115 @@
+name: Build AutoForge
+
+# Place this file at .github/workflows/android-build.yml in the repo root
+# (the folder that contains android/ and backend/).
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: 'HTTPS URL of your deployed backend (baked into the APK as BACKEND_URL)'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: android
+    env:
+      # Manual input wins; otherwise the repo variable AUTOFORGE_BACKEND
+      # (Settings > Secrets and variables > Actions > Variables); otherwise the
+      # default from android/gradle.properties (http://10.0.2.2:8080/).
+      BACKEND_URL: ${{ inputs.backend_url || vars.AUTOFORGE_BACKEND }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+
+      # The repo has no Gradle wrapper, so install the same Gradle the
+      # backend builder image uses (8.9; AGP 8.5.2 needs 8.7+).
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        run: |
+          ARGS=()
+          if [ -n "$BACKEND_URL" ]; then
+            ARGS+=("-PautoforgeBackend=$BACKEND_URL")
+          fi
+          gradle assembleDebug --stacktrace --console=plain "${ARGS[@]}"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoForge-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  backend:
+    name: Backend check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Syntax check
+        run: |
+          for f in src/*.js scripts/*.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+  release:
+    name: Attach APK to GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, backend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: AutoForge-debug-apk
+          path: apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: apk/*.apk
+          generate_release_notes: true
